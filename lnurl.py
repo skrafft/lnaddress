@@ -30,10 +30,9 @@ async def lnurl_response(username: str, domain: str, request: Request):
         "metadata": await address.lnurlpay_metadata(domain=domain),
         "commentAllowed": 100,
         "minSendable": 1000,
-        "maxSendable": 1000000000,
+        "maxSendable": 5000000000,
     }
 
-    logger.debug("RESP", resp)
     return resp
 
 

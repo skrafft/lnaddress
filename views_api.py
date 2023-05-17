@@ -14,6 +14,8 @@ from . import lnaddress_ext, scheduled_tasks
 from .cloudflare import cloudflare_create_record
 from .crud import (
     check_address_available,
+    check_domain_available,
+    check_domain_restricted,
     create_address,
     create_domain,
     delete_address,
@@ -58,6 +60,12 @@ async def api_domain_create(
     domain_id=None,
     g: WalletTypeInfo = Depends(get_key_type),
 ):
+    # If domain is restricted by server admin
+    if check_domain_restricted(data.domain):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail="This domain name use is restricted by admin",
+        )
     if domain_id:
         domain = await get_domain(domain_id)
 
@@ -71,20 +79,35 @@ async def api_domain_create(
                 status_code=HTTPStatus.FORBIDDEN, detail="Not your domain"
             )
 
+        if domain.domain != data.domain:
+            domain_available = await check_domain_available(data.domain)
+            if domain_available == False:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    detail="This domain name is already in use",
+                )
+
         domain = await update_domain(domain_id, **data.dict())
     else:
+        domain_available = await check_domain_available(data.domain)
+        if domain_available == False:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="This domain name is already in use",
+            )
 
         domain = await create_domain(data=data)
-        root_url = urlparse(str(request.url)).netloc
 
-        cf_response = await cloudflare_create_record(domain=domain, ip=root_url)
+        if domain.cf_token and domain.cf_zone_id:       
+            root_url = urlparse(str(request.url)).netloc
+            cf_response = await cloudflare_create_record(domain=domain, ip=root_url)
 
-        if not cf_response or not cf_response["success"]:
-            await delete_domain(domain.id)
-            logger.error("Cloudflare failed with: " + cf_response["errors"][0]["message"])  # type: ignore
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST, detail="Problem with cloudflare."
-            )
+            if not cf_response or not cf_response["success"]:
+                await delete_domain(domain.id)
+                logger.error("Cloudflare failed with: " + cf_response["errors"][0]["message"])  # type: ignore
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST, detail="Problem with cloudflare."
+                )
 
     return domain.dict()
 
@@ -160,10 +183,9 @@ async def api_lnaddress_make_address(
         )
 
     domain_cost = domain.cost
-    sats = data.sats
 
     ## FAILSAFE FOR CREATING ADDRESSES BY API
-    if domain_cost * data.duration != data.sats:
+    if data.sats == 0 or max(domain_cost * data.duration, 1) != data.sats:
         raise HTTPException(
             status_code=HTTPStatus.FORBIDDEN,
             detail="The amount is not correct. Either 'duration', or 'sats' are wrong.",
@@ -186,7 +208,7 @@ async def api_lnaddress_make_address(
             payment_hash, payment_request = await create_invoice(
                 wallet_id=domain.wallet,
                 amount=data.sats,
-                memo=f"Renew {data.username}@{domain.domain} for {sats} sats for {data.duration} more days",
+                memo=f"Renew {data.username}@{domain.domain} for {data.sats} sats for {data.duration} more days",
                 extra={
                     "tag": "renew lnaddress",
                     "id": address.id,
@@ -212,8 +234,8 @@ async def api_lnaddress_make_address(
         try:
             payment_hash, payment_request = await create_invoice(
                 wallet_id=domain.wallet,
-                amount=sats,
-                memo=f"LNAddress {data.username}@{domain.domain} for {sats} sats for {data.duration} days",
+                amount=data.sats,
+                memo=f"LNAddress {data.username}@{domain.domain} for {data.sats} sats for {data.duration} days",
                 extra={"tag": "lnaddress"},
             )
         except Exception as e:
